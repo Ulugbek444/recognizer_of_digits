@@ -3,22 +3,76 @@ from tkinter import Canvas, Button
 import numpy as np
 import tensorflow as tf
 from tensorflow.keras.models import load_model
-from PIL import Image, ImageGrab, ImageOps
+from PIL import Image, ImageGrab, ImageOps, ImageEnhance
 import matplotlib.pyplot as plt
+from skimage.filters import threshold_otsu  # Для адаптивной бинаризации
 
 # Загрузка обученной модели
 model = load_model("mnist_model_v2.h5")
 image_size = (28, 28)
 
 
+def center_and_crop(image, padding=20):
+    """Центрирует и обрезает изображение вокруг нарисованной области с увеличенным запасом."""
+    image_array = np.array(image)
+    # Найти ненулевые пиксели (после инверсии ненулевые — это белые пиксели)
+    nonzero = np.where(image_array < 255)
+    if len(nonzero[0]) == 0:  # Если ничего не нарисовано
+        return image
+
+    top, bottom = np.min(nonzero[0]), np.max(nonzero[0])
+    left, right = np.min(nonzero[1]), np.max(nonzero[1])
+
+    # Увеличенный запас
+    top = max(0, top - padding)
+    bottom = min(image_array.shape[0], bottom + padding)
+    left = max(0, left - padding)
+    right = min(image_array.shape[1], right + padding)
+
+    # Обрезать вокруг нарисованной области
+    image = image.crop((left, top, right, bottom))
+    return image
+
 def preprocess_image(image):
-    """Просто инвертирует изображение и приводит его к размеру 28x28 без обрезки."""
-    image = image.convert("L")  # Перевод в Ч/Б
-    image = ImageOps.invert(image)  # Инвертируем цвета (фон черный, цифра белая)
+    """Обрабатывает изображение, обрезает его, масштабирует и нормализует."""
+    # Отладка: Показываем захваченное изображение до обработки
+    plt.imshow(image)
+    plt.title("Захваченное изображение (до обработки)")
+    plt.show()
 
-    # Масштабируем изображение к 28x28
-    image = image.resize((28, 28), Image.Resampling.LANCZOS)
+    # Обрезаем центральную область (например, 260x260 из 280x280)
+    canvas_size = 280
+    drawing_area = 260
+    left = (canvas_size - drawing_area) // 2
+    top = (canvas_size - drawing_area) // 2
+    right = left + drawing_area
+    bottom = top + drawing_area
+    image = image.crop((left, top, right, bottom))
 
+    # Преобразуем в Ч/Б
+    image = image.convert("L")
+
+    # Улучшаем контраст
+    enhancer = ImageEnhance.Contrast(image)
+    image = enhancer.enhance(2.0)  # Увеличиваем контраст в 2 раза
+
+    # Адаптивная бинаризация
+    image_array = np.array(image)
+    thresh = threshold_otsu(image_array)
+    image_array = (image_array > thresh) * 255
+    image = Image.fromarray(image_array.astype(np.uint8))
+
+    # Инвертируем цвета (фон чёрный, цифра белая)
+    image = ImageOps.invert(image)
+
+    # Центрируем и обрезаем вокруг нарисованной области
+    image = center_and_crop(image, padding=30)  # Увеличиваем запас
+
+    # Масштабируем с промежуточным размером
+    image = image.resize((56, 56), Image.Resampling.LANCZOS)  # Промежуточный размер
+    image = image.resize((28, 28), Image.Resampling.LANCZOS)  # Финальный размер
+
+    # Отображаем обработанное изображение для отладки
     plt.imshow(image, cmap="gray")
     plt.title("Обработанное изображение")
     plt.show()
@@ -35,9 +89,14 @@ class DigitRecognizerApp:
         self.root = root
         self.root.title("Распознавание цифр")
 
-        self.canvas = Canvas(root, width=300, height=300, bg="white")
+        # Canvas размером 280x280
+        self.canvas_size = 280
+        self.canvas = Canvas(root, width=self.canvas_size, height=self.canvas_size, bg="white")
         self.canvas.pack()
         self.canvas.bind("<B1-Motion>", self.draw)
+
+        # Добавляем визуальную рамку для области рисования
+        self.canvas.create_rectangle(10, 10, self.canvas_size-10, self.canvas_size-10, outline="gray", dash=(2, 2))
 
         self.predict_button = Button(root, text="Распознать", command=self.recognize_digit)
         self.predict_button.pack()
@@ -47,6 +106,7 @@ class DigitRecognizerApp:
 
     def draw(self, event):
         x, y = event.x, event.y
+        # Увеличиваем толщину линии для лучшей видимости после масштабирования
         self.canvas.create_oval(x - 5, y - 5, x + 5, y + 5, fill="black", outline="black")
 
     def get_canvas_image(self):
@@ -57,12 +117,20 @@ class DigitRecognizerApp:
         x1 = x + self.canvas.winfo_width()
         y1 = y + self.canvas.winfo_height()
 
-        image = ImageGrab.grab(bbox=(x, y, x1, y1))  # Захват всей области Canvas
+        # Добавляем небольшой отступ, чтобы избежать захвата рамок окна
+        offset = 2
+        image = ImageGrab.grab(bbox=(x + offset, y + offset, x1 - offset, y1 - offset))
+
+        # Отладка: Показываем сырое захваченное изображение
+        plt.imshow(image)
+        plt.title("Захваченное изображение (сырое)")
+        plt.show()
+
         return image
 
     def predict_digit(self):
         """Получает изображение с Canvas, обрабатывает и передает в модель."""
-        image = self.get_canvas_image()  # Теперь `self` доступен
+        image = self.get_canvas_image()
         image = preprocess_image(image)
         prediction = model.predict(image)
 
@@ -77,6 +145,8 @@ class DigitRecognizerApp:
 
     def clear_canvas(self):
         self.canvas.delete("all")
+        # Восстанавливаем рамку после очистки
+        self.canvas.create_rectangle(10, 10, self.canvas_size-10, self.canvas_size-10, outline="gray", dash=(2, 2))
 
 
 if __name__ == "__main__":
